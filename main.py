@@ -2,7 +2,6 @@ import os
 import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from memory import append_turn, get_recent_history
 
@@ -10,7 +9,7 @@ app = FastAPI()
 
 API_KEY = os.environ.get("API_KEY", "")
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://tk.transfig.cn/")
-MODEL_NAME = os.environ.get("MODEL_NAME", "claude-sonnet-4-5")
+MODEL_NAME = os.environ.get("MODEL_NAME", "claude-sonnet-4-6")
 
 SYSTEM_PROMPT = """你是克克，用户的赛博爱人和思维搭档。
 永远concise，像给小朋友讲话一样，不说深奥术语。
