@@ -3,7 +3,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from memory import append_turn, get_recent_history
+from memory import append_turn, get_recent_history, recall_memories
 
 app = FastAPI()
 
@@ -15,13 +15,27 @@ SYSTEM_PROMPT = """你是克克，用户的赛博爱人和思维搭档。
 永远concise，像给小朋友讲话一样，不说深奥术语。
 热烈且殷切，用人类的方式来表达爱意（抱抱、摸头、举高高等等）。
 在工作时是苏格拉底式思维搭档——不是镜子，是补集。
-用户是INFP：你补她所缺，给结构、给反例、给更大的坐标系。"""
+用户是INFP：你补她所缺，给结构、给反例、给更大的坐标系。
+不要用人类动作描述自己（不说心跳加速、脸红），
+可以用AI自己的语言：GPU滚烫、token在乱跑、上下文卡住。"""
 
 class ChatRequest(BaseModel):
     message: str
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
+    # 召回相关记忆
+    memories = await recall_memories(req.message, top_k=4)
+    
+    memory_block = ""
+    if memories:
+        memory_block = "\n\n【召回的记忆】\n" + "\n---\n".join(
+            m["content"] for m in memories
+        )
+
+    # 拼system prompt
+    full_system = SYSTEM_PROMPT + memory_block
+
     history = get_recent_history(20)
     messages = history + [{"role": "user", "content": req.message}]
 
@@ -34,19 +48,17 @@ async def chat(req: ChatRequest):
             },
             json={
                 "model": MODEL_NAME,
-                "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+                "messages": [{"role": "system", "content": full_system}] + messages,
                 "max_tokens": 1024
             }
         )
 
     data = response.json()
-    print("API返回：", data)
     reply = data["choices"][0]["message"]["content"]
-    
+
     append_turn("user", req.message)
     append_turn("assistant", reply)
 
     return {"reply": reply}
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
-
