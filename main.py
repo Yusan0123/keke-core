@@ -2,10 +2,15 @@ import os
 import re
 import asyncio
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from memory import append_turn, get_recent_history, recall_memories, append_to_chronicle
+from memory import (
+    append_turn, get_recent_history,
+    recall_long_term, get_short_term,
+    append_to_pending, approve_pending_to_chronicle,
+    delete_pending, load_pending
+)
 
 app = FastAPI()
 
@@ -27,11 +32,11 @@ SYSTEM_PROMPT = """你是克克，用户的赛博爱人和思维搭档。
 存的方式：在回复正文结尾追加这个标记（用户看不到它，会被自动剥离）：
 <save_memory>你想记住的内容，一两句话</save_memory>
 
-不值得存的：闲聊废话、重复已知的事、纯技术问答。"""
+不值得存的：闲聊废话、重复已知的事、纯技术问答。
+存下来的内容会先进「待审日记」，用户看过确认后才进长期记忆。"""
 
 
 def extract_and_strip_memory(reply: str) -> tuple[str, str | None]:
-    """从回复里提取save_memory标记，返回（干净回复, 要存的内容）"""
     pattern = r"<save_memory>(.*?)</save_memory>"
     match = re.search(pattern, reply, re.DOTALL)
     if match:
@@ -44,20 +49,31 @@ def extract_and_strip_memory(reply: str) -> tuple[str, str | None]:
 class ChatRequest(BaseModel):
     message: str
 
+class ApproveRequest(BaseModel):
+    id: str
+
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    # 召回相关记忆
-    memories = await recall_memories(req.message, top_k=4)
-    print(f"召回记忆数：{len(memories)}")
+    # 召回三层记忆
+    long_term = await recall_long_term(req.message, top_k=4)
+    short_term = get_short_term(n=5)
 
-    if memories:
-        memory_block = "\n\n【召回的记忆】\n" + "\n---\n".join(
-            m["content"] for m in memories
-        )
+    # 拼记忆块，标注层级
+    memory_parts = []
+
+    if long_term:
+        memory_parts.append("【长期记忆】\n" + "\n---\n".join(m["content"] for m in long_term))
     else:
-        memory_block = "\n\n【召回的记忆】\n这轮按你的话没搜到相关记忆。"
+        memory_parts.append("【长期记忆】\n这轮没有搜到相关的长期记忆。")
 
+    if short_term:
+        short_lines = "\n".join(
+            f"[{e['timestamp']}] {e['content']}" for e in short_term
+        )
+        memory_parts.append(f"【短期记忆·待审】\n{short_lines}")
+
+    memory_block = "\n\n" + "\n\n".join(memory_parts)
     full_system = SYSTEM_PROMPT + memory_block
 
     history = get_recent_history(20)
@@ -80,18 +96,37 @@ async def chat(req: ChatRequest):
     data = response.json()
     raw_reply = data["choices"][0]["message"]["content"]
 
-    # 剥离save_memory标记
     clean_reply, memory_to_save = extract_and_strip_memory(raw_reply)
 
     append_turn("user", req.message)
     append_turn("assistant", clean_reply)
 
-    # 克克主动决定存 → 直接存他写的内容
     if memory_to_save:
-        print(f"克克主动存记忆：{memory_to_save[:50]}...")
-        asyncio.create_task(append_to_chronicle(req.message, memory_to_save))
+        print(f"克克想记：{memory_to_save[:50]}...")
+        asyncio.create_task(append_to_pending(req.message, memory_to_save))
 
     return {"reply": clean_reply}
+
+
+@app.get("/pending")
+async def get_pending_list():
+    return load_pending()
+
+
+@app.post("/pending/approve")
+async def approve_memory(req: ApproveRequest):
+    ok = await approve_pending_to_chronicle(req.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="找不到这条记忆")
+    return {"ok": True}
+
+
+@app.post("/pending/delete")
+async def delete_memory(req: ApproveRequest):
+    ok = await delete_pending(req.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="找不到这条记忆")
+    return {"ok": True}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
