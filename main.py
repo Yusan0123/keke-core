@@ -43,8 +43,9 @@ async def chat(req: ChatRequest):
         )
 
     data = response.json()
+    print("API返回：", data)
     reply = data["choices"][0]["message"]["content"]
-
+    
     append_turn("user", req.message)
     append_turn("assistant", reply)
 
