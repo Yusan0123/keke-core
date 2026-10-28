@@ -9,7 +9,7 @@ CHRONICLE_FILE = "chronicle.json"
 
 EMBED_API_KEY = os.environ.get("EMBED_API_KEY", "")
 EMBED_API_BASE = os.environ.get("EMBED_API_BASE", "https://aihubmix.com")
-EMBED_MODEL = "text-embedding-3-small"
+EMBED_MODEL = "BAAI/bge-m3"
 
 # ── 基础对话历史 ──────────────────────────────────────
 
