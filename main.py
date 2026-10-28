@@ -25,7 +25,6 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    # 拼上下文
     history = get_recent_history(20)
     messages = history + [{"role": "user", "content": req.message}]
 
@@ -43,17 +42,13 @@ async def chat(req: ChatRequest):
             }
         )
 
-            }
-        )
-
     data = response.json()
     reply = data["choices"][0]["message"]["content"]
 
-    # 落账
     append_turn("user", req.message)
     append_turn("assistant", reply)
 
     return {"reply": reply}
 
-# 挂载前端静态文件
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
+
