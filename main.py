@@ -31,22 +31,23 @@ async def chat(req: ChatRequest):
 
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
-            f"{API_BASE_URL.rstrip('/')}/v1/messages",
+            f"{API_BASE_URL.rstrip('/')}/v1/chat/completions",
             headers={
-                "x-api-key": API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json"
             },
             json={
                 "model": MODEL_NAME,
-                "max_tokens": 1024,
-                "system": SYSTEM_PROMPT,
-                "messages": messages
+                "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+                "max_tokens": 1024
+            }
+        )
+
             }
         )
 
     data = response.json()
-    reply = data["content"][0]["text"]
+    reply = data["choices"][0]["message"]["content"]
 
     # 落账
     append_turn("user", req.message)
