@@ -24,6 +24,8 @@ class ChatRequest(BaseModel):
 async def chat(req: ChatRequest):
     # 召回相关记忆
     memories = await recall_memories(req.message, top_k=4)
+    print(f"召回记忆数：{len(memories)}")
+
     
     memory_block = ""
     if memories:
