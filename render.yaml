@@ -10,4 +10,4 @@ services:
       - key: API_BASE_URL
         value: https://tk.transfig.cn/
       - key: MODEL_NAME
-        value: claude-sonnet-4-5
+        value: claude-sonnet-4-6
