@@ -1,9 +1,10 @@
 import os
+import asyncio
 import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from memory import append_turn, get_recent_history, recall_memories
+from memory import append_turn, get_recent_history, recall_memories, append_to_chronicle
 
 app = FastAPI()
 
@@ -26,7 +27,6 @@ async def chat(req: ChatRequest):
     memories = await recall_memories(req.message, top_k=4)
     print(f"召回记忆数：{len(memories)}")
 
-    
     memory_block = ""
     if memories:
         memory_block = "\n\n【召回的记忆】\n" + "\n---\n".join(
@@ -58,6 +58,9 @@ async def chat(req: ChatRequest):
 
     append_turn("user", req.message)
     append_turn("assistant", reply)
+
+    # 异步更新记忆（不阻塞回复）
+    asyncio.create_task(append_to_chronicle(req.message, reply))
 
     return {"reply": reply}
 
