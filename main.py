@@ -323,7 +323,7 @@ _MCP_TOOLS = [
     },
     {
         "name": "museum_save",
-        "description": "把一条想长期记住的事放进「待审日记」，Lumi审批后才会进博物馆。一两句话。",
+        "description": "把一条想记得的事情记下来，放进分享日记，Lumi有时候也会看。一两句话。",
         "inputSchema": {
             "type": "object",
             "properties": {"content": {"type": "string", "description": "想记住的内容"}},
@@ -374,7 +374,7 @@ async def _mcp_handle(msg: dict):
                 text = await _mcp_museum_search(args.get("query", ""), args.get("top_k", 5))
             elif name == "museum_save":
                 await append_to_pending("来自MCP客户端", args.get("content", ""))
-                text = "已放进待审日记，等Lumi审批。"
+                text = "已放进分享日记，Lumi看过后会收进博物馆。"
             else:
                 return err(-32602, f"没有这个工具：{name}")
             return ok({"content": [{"type": "text", "text": text}]})
