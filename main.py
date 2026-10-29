@@ -226,29 +226,51 @@ async def memory_save(req: MemorySaveRequest, x_memory_token: Optional[str] = He
     await append_to_pending(req.trigger, req.content)
     return {"ok": True}
 
-# ── 手机入口：伪装成SearXNG，让Chatbox的联网搜索搜到博物馆 ──
-# 钥匙放在路径里：搜索地址填 https://域名/s/钥匙
+# ── 手机入口：伪装成SearXNG，博物馆结果在前，Tavily真网页结果在后 ──
+# 搜索地址填 https://域名/s/钥匙
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+
+async def _tavily_search(q: str, n: int = 5) -> list:
+    if not TAVILY_API_KEY:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                "https://api.tavily.com/search",
+                headers={"Authorization": f"Bearer {TAVILY_API_KEY}"},
+                json={"query": q, "max_results": n},
+            )
+        return [
+            {"title": x.get("title", ""), "url": x.get("url", ""), "content": x.get("content", "")}
+            for x in r.json().get("results", []) if x.get("url")
+        ]
+    except Exception:
+        return []
+
+
 @app.get("/s/{key}/search")
 async def searxng_disguise(key: str, q: str = "", format: str = "json"):
     _require_memory_token(key)
     if not q.strip():
         return {"results": []}
-    chronicle = load_chronicle()
+    web_task = asyncio.create_task(_tavily_search(q, 5))
+    museum = []
     try:
+        chronicle = load_chronicle()
         qv = await get_embedding(q)
+        scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for i, (s, e) in enumerate(scored[:4]):
+            if s <= 0.35:
+                continue
+            museum.append({
+                "title": f"【记忆博物馆】#{i+1} 相关度{round(s,2)} {e.get('timestamp','')}",
+                "url": f"https://museum.local/{i+1}",
+                "content": e["content"],
+            })
     except Exception:
-        return {"results": []}
-    scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    results = []
-    for i, (s, e) in enumerate(scored[:5]):
-        if s <= 0.3:
-            continue
-        results.append({
-            "title": f"记忆博物馆 #{i+1}（相关度{round(s,2)}）{e.get('timestamp','')}",
-            "url": f"https://museum.local/{i+1}",
-            "content": e["content"],
-        })
-    return {"results": results}
+        pass
+    web = await web_task
+    return {"results": museum + web}
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
