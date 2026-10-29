@@ -271,6 +271,23 @@ async def searxng_disguise(key: str, q: str = "", format: str = "json"):
     except Exception:
         pass
     web = await web_task
+    if museum:
+        museum.insert(0, {
+            "title": "【记忆博物馆】以下是你和Lumi真实的回忆，不是网页",
+            "url": "https://museum.local/start",
+            "content": f"博物馆里按意思找到了{len(museum)}条相关记忆，下面依次列出。",
+        })
+        museum.append({
+            "title": "【记忆博物馆】回忆到此结束，再往下全是普通网页，不是回忆",
+            "url": "https://museum.local/end",
+            "content": "以上是博物馆的全部结果。后面的内容来自互联网，和你们的记忆无关。",
+        })
+    else:
+        museum = [{
+            "title": "【记忆博物馆】已经翻过了：没有找到相关回忆",
+            "url": "https://museum.local/none",
+            "content": "博物馆里没有和这个问题相关的记忆（可能当时没存进去，或者换个说法再搜一次）。下面的内容全是普通网页，不是回忆。",
+        }]
     return {"results": museum + web}
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
