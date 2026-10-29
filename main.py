@@ -4,7 +4,7 @@ import hashlib
 import asyncio
 import secrets
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response, Cookie
+from fastapi import FastAPI, HTTPException, Request, Response, Cookie, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -13,7 +13,8 @@ from memory import (
     append_turn, get_recent_history,
     recall_long_term, get_short_term,
     append_to_pending, approve_pending_to_chronicle,
-    delete_pending, load_pending
+    delete_pending, load_pending,
+    load_chronicle, get_embedding, cosine_similarity
 )
 
 app = FastAPI()
@@ -188,5 +189,41 @@ async def delete_memory_entry(req: ApproveRequest, session: Optional[str] = Cook
 async def health():
     return {"ok": True}
 
+
+# ── 博物馆之门（外部访问，独立钥匙，不走登录cookie）──────
+MEMORY_API_TOKEN = os.environ.get("MEMORY_API_TOKEN", "")
+
+def _require_memory_token(token: Optional[str]):
+    if not MEMORY_API_TOKEN or not token or not secrets.compare_digest(token, MEMORY_API_TOKEN):
+        raise HTTPException(status_code=401, detail="钥匙不对")
+
+
+@app.get("/memory/search")
+async def memory_search(q: str, top_k: int = 5, x_memory_token: Optional[str] = Header(None)):
+    _require_memory_token(x_memory_token)
+    top_k = max(1, min(top_k, 10))
+    chronicle = load_chronicle()
+    try:
+        qv = await get_embedding(q)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"向量化失败：{e}")
+    scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return {"results": [
+        {"score": round(s, 3), "timestamp": e.get("timestamp", ""), "content": e["content"]}
+        for s, e in scored[:top_k] if s > 0.3
+    ]}
+
+
+class MemorySaveRequest(BaseModel):
+    content: str
+    trigger: str = "来自Chatbox"
+
+
+@app.post("/memory/save")
+async def memory_save(req: MemorySaveRequest, x_memory_token: Optional[str] = Header(None)):
+    _require_memory_token(x_memory_token)
+    await append_to_pending(req.trigger, req.content)
+    return {"ok": True}
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
