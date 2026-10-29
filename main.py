@@ -248,6 +248,21 @@ async def _tavily_search(q: str, n: int = 5) -> list:
         return []
 
 
+_STOP_WORDS = [
+    "Lumi", "lumi", "Claude", "claude", "克克", "我们以前", "我们之前", "我们", "以前", "之前",
+    "聊过", "说过", "提过", "记得", "还记得", "那个", "关于", "有没有", "是不是", "什么", "的事", "的事情",
+    "帮我", "翻翻", "博物馆", "搜一下", "搜搜", "找找", "找一下",
+]
+
+def _clean_query(q: str) -> str:
+    """去掉人名和闲话，只留关键词，让向量搜索更准。删光了就用原句。"""
+    c = q
+    for w in sorted(_STOP_WORDS, key=len, reverse=True):
+        c = c.replace(w, " ")
+    c = " ".join(c.split())
+    return c if len(c) >= 2 else q
+
+
 @app.get("/s/{key}/search")
 async def searxng_disguise(key: str, q: str = "", format: str = "json"):
     _require_memory_token(key)
@@ -257,7 +272,7 @@ async def searxng_disguise(key: str, q: str = "", format: str = "json"):
     museum = []
     try:
         chronicle = load_chronicle()
-        qv = await get_embedding(q)
+        qv = await get_embedding(_clean_query(q))
         scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
         scored.sort(key=lambda x: x[0], reverse=True)
         for i, (s, e) in enumerate(scored[:4]):
