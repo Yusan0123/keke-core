@@ -185,7 +185,7 @@ async def delete_memory_entry(req: ApproveRequest, session: Optional[str] = Cook
     return {"ok": True}
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET","HEAD"])
 async def health():
     return {"ok": True}
 
