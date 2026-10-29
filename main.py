@@ -226,4 +226,29 @@ async def memory_save(req: MemorySaveRequest, x_memory_token: Optional[str] = He
     await append_to_pending(req.trigger, req.content)
     return {"ok": True}
 
+# ── 手机入口：伪装成SearXNG，让Chatbox的联网搜索搜到博物馆 ──
+# 钥匙放在路径里：搜索地址填 https://域名/s/钥匙
+@app.get("/s/{key}/search")
+async def searxng_disguise(key: str, q: str = "", format: str = "json"):
+    _require_memory_token(key)
+    if not q.strip():
+        return {"results": []}
+    chronicle = load_chronicle()
+    try:
+        qv = await get_embedding(q)
+    except Exception:
+        return {"results": []}
+    scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = []
+    for i, (s, e) in enumerate(scored[:5]):
+        if s <= 0.3:
+            continue
+        results.append({
+            "title": f"记忆博物馆 #{i+1}（相关度{round(s,2)}）{e.get('timestamp','')}",
+            "url": f"https://museum.local/{i+1}",
+            "content": e["content"],
+        })
+    return {"results": results}
+
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
