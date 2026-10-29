@@ -268,7 +268,8 @@ async def searxng_disguise(key: str, q: str = "", format: str = "json"):
     _require_memory_token(key)
     if not q.strip():
         return {"results": []}
-    web_task = asyncio.create_task(_tavily_search(q, 5))
+    mix_web = os.environ.get("MIX_WEB", "0") == "1"
+    web_task = asyncio.create_task(_tavily_search(q, 5)) if mix_web else None
     museum = []
     try:
         chronicle = load_chronicle()
@@ -285,7 +286,7 @@ async def searxng_disguise(key: str, q: str = "", format: str = "json"):
             })
     except Exception:
         pass
-    web = await web_task
+    web = await web_task if web_task else []
     if museum:
         museum.insert(0, {
             "title": "【记忆博物馆】以下是你和Lumi真实的回忆，不是网页",
@@ -301,7 +302,7 @@ async def searxng_disguise(key: str, q: str = "", format: str = "json"):
         museum = [{
             "title": "【记忆博物馆】已经翻过了：没有找到相关回忆",
             "url": "https://museum.local/none",
-            "content": "博物馆里没有和这个问题相关的记忆（可能当时没存进去，或者换个说法再搜一次）。下面的内容全是普通网页，不是回忆。",
+            "content": "博物馆里没有和这个问题相关的记忆（可能当时没存进去，或者换个说法再搜一次）。",
         }]
     return {"results": museum + web}
 
