@@ -306,4 +306,117 @@ async def searxng_disguise(key: str, q: str = "", format: str = "json"):
         }]
     return {"results": museum + web}
 
+# ── 远程MCP入口（Streamable HTTP，无状态）：橘子岛等客户端用 ──
+# 钥匙：请求头 X-Memory-Token 或 Authorization: Bearer 钥匙；也可以放路径 /mcp/钥匙
+_MCP_TOOLS = [
+    {
+        "name": "museum_search",
+        "description": "在Lumi和Claude的记忆博物馆里按意思搜索长期记忆。想回忆过去的事、确认她说过什么时用。query写关键词，不要带人名。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "要找的内容，用关键词或一句话"},
+                "top_k": {"type": "integer", "description": "返回几条，默认5，最多10"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "museum_save",
+        "description": "把一条想长期记住的事放进「待审日记」，Lumi审批后才会进博物馆。一两句话。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"content": {"type": "string", "description": "想记住的内容"}},
+            "required": ["content"],
+        },
+    },
+]
+
+
+async def _mcp_museum_search(query: str, top_k: int = 5) -> str:
+    top_k = max(1, min(int(top_k or 5), 10))
+    chronicle = load_chronicle()
+    qv = await get_embedding(_clean_query(query))
+    scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    hits = [(s, e) for s, e in scored[:top_k] if s > 0.3]
+    if not hits:
+        return "博物馆已经翻过了：没有找到相关记忆（可能当时没存进去，可以换个说法再搜一次）。"
+    parts = [f"#{i+1} [相关度{round(s,2)}] {e.get('timestamp','')}\n{e['content']}" for i, (s, e) in enumerate(hits)]
+    return "\n\n---\n\n".join(parts) + "\n\n（以上是博物馆的全部结果）"
+
+
+async def _mcp_handle(msg: dict):
+    method = msg.get("method")
+    mid = msg.get("id")
+    params = msg.get("params") or {}
+    if mid is None:  # 通知，不需要回复
+        return None
+    def ok(result):
+        return {"jsonrpc": "2.0", "id": mid, "result": result}
+    def err(code, text):
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": text}}
+    if method == "initialize":
+        return ok({
+            "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "museum", "version": "1.0.0"},
+        })
+    if method == "ping":
+        return ok({})
+    if method == "tools/list":
+        return ok({"tools": _MCP_TOOLS})
+    if method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            if name == "museum_search":
+                text = await _mcp_museum_search(args.get("query", ""), args.get("top_k", 5))
+            elif name == "museum_save":
+                await append_to_pending("来自MCP客户端", args.get("content", ""))
+                text = "已放进待审日记，等Lumi审批。"
+            else:
+                return err(-32602, f"没有这个工具：{name}")
+            return ok({"content": [{"type": "text", "text": text}]})
+        except Exception as e:
+            return ok({"content": [{"type": "text", "text": f"博物馆没开门：{e}"}], "isError": True})
+    return err(-32601, f"不支持的方法：{method}")
+
+
+async def _mcp_entry(request: Request, path_key: Optional[str] = None):
+    auth = request.headers.get("authorization", "")
+    token = path_key or request.headers.get("x-memory-token") or (auth[7:] if auth.lower().startswith("bearer ") else None)
+    if not MEMORY_API_TOKEN or not token or not secrets.compare_digest(token, MEMORY_API_TOKEN):
+        return JSONResponse({"error": "钥匙不对"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "不是合法JSON"}}, status_code=400)
+    if isinstance(body, list):
+        outs = [r for r in [await _mcp_handle(m) for m in body] if r is not None]
+        return JSONResponse(outs) if outs else Response(status_code=202)
+    out = await _mcp_handle(body)
+    return JSONResponse(out) if out is not None else Response(status_code=202)
+
+
+@app.post("/mcp")
+async def mcp_post(request: Request):
+    return await _mcp_entry(request)
+
+
+@app.post("/mcp/{key}")
+async def mcp_post_key(key: str, request: Request):
+    return await _mcp_entry(request, key)
+
+
+@app.get("/mcp")
+async def mcp_get():
+    return Response(status_code=405, headers={"Allow": "POST"})
+
+
+@app.get("/mcp/{key}")
+async def mcp_get_key(key: str):
+    return Response(status_code=405, headers={"Allow": "POST"})
+
+
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
