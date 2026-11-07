@@ -473,10 +473,15 @@ function renderDiary(items) {
 async function approveDiary(id, btn) {
   btn.disabled = true; btn.textContent = '存入中…';
   try {
-    await fetch('/pending/approve', {
+    const res = await fetch('/pending/approve', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id })
     });
+    if (!res.ok) {
+      btn.textContent = res.status === 401 ? '登录过期，刷新重登' : ('没存成(' + res.status + ')，再点一次');
+      btn.disabled = false;
+      return;
+    }
     const card = btn.closest('.diary-card');
     card.style.opacity = '0.25';
     setTimeout(() => { card.remove(); refreshBadge(); }, 500);
