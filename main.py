@@ -14,7 +14,8 @@ from memory import (
     recall_long_term, get_short_term,
     append_to_pending, approve_pending_to_chronicle,
     delete_pending, load_pending,
-    load_chronicle, get_embedding, cosine_similarity
+    load_chronicle, get_embedding, cosine_similarity,
+    ingest_to_chronicle, forget_from_chronicle
 )
 
 app = FastAPI()
@@ -210,7 +211,7 @@ async def memory_search(q: str, top_k: int = 5, x_memory_token: Optional[str] = 
     scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
     scored.sort(key=lambda x: x[0], reverse=True)
     return {"results": [
-        {"score": round(s, 3), "timestamp": e.get("timestamp", ""), "content": e["content"]}
+        {"score": round(s, 3), "id": e.get("id", ""), "timestamp": e.get("timestamp", ""), "content": e["content"]}
         for s, e in scored[:top_k] if s > 0.3
     ]}
 
@@ -225,6 +226,38 @@ async def memory_save(req: MemorySaveRequest, x_memory_token: Optional[str] = He
     _require_memory_token(x_memory_token)
     await append_to_pending(req.trigger, req.content)
     return {"ok": True}
+
+class IngestRequest(BaseModel):
+    content: str
+    date: str = ""
+    tag: str = ""
+    source: str = "ChatGPT"
+
+
+@app.post("/memory/ingest")
+async def memory_ingest(req: IngestRequest, x_memory_token: Optional[str] = Header(None)):
+    _require_memory_token(x_memory_token)
+    if len(req.content) > 3000:
+        raise HTTPException(status_code=413, detail="太长了，请拆成几条，每条不超过3000字")
+    try:
+        r = await ingest_to_chronicle(req.content, req.date, req.tag, req.source)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"ok": True, **r}
+
+
+class ForgetRequest(BaseModel):
+    id: str
+
+
+@app.post("/memory/forget")
+async def memory_forget(req: ForgetRequest, x_memory_token: Optional[str] = Header(None)):
+    _require_memory_token(x_memory_token)
+    n = await forget_from_chronicle(req.id)
+    if not n:
+        raise HTTPException(status_code=404, detail="找不到这个id")
+    return {"ok": True, "removed": n}
+
 
 _approve_state = {"running": False, "done": 0, "failed": [], "total": 0}
 

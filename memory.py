@@ -189,6 +189,95 @@ async def delete_pending(entry_id: str) -> bool:
     await _push_file_to_github(PENDING_FILE, new_pending, f"delete: pending {entry_id[:8]}")
     return True
 
+# ── 直接入长期记忆（带钥匙的接口用，不经待审）──────────
+import re as _re
+
+_PUSH_GEN = 0
+
+def split_text(text: str, limit: int = 400) -> list:
+    """按段落/句号拆成每段不超过limit字，留空间给日期标签前缀（总长<512）"""
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    pieces = [p for p in _re.split(r'(?<=[。！？!?；;\n])', text) if p.strip()]
+    out, cur = [], ""
+    for p in pieces:
+        while len(p) > limit:
+            if cur:
+                out.append(cur); cur = ""
+            out.append(p[:limit]); p = p[limit:]
+        if len(cur) + len(p) > limit and cur:
+            out.append(cur); cur = ""
+        cur += p
+    if cur.strip():
+        out.append(cur)
+    return [o.strip() for o in out if o.strip()]
+
+@_locked
+async def ingest_to_chronicle(content: str, date: str = "", tag: str = "", source: str = "ChatGPT") -> dict:
+    date = (date or datetime.now().strftime("%Y-%m-%d %H:%M"))[:20]
+    tag = (tag or "")[:30]
+    parts = split_text(content)
+    if not parts:
+        return {"added": 0, "skipped": 0, "ids": []}
+    chronicle = load_chronicle()
+    existing = {e.get("content") for e in chronicle}
+    new_entries, skipped = [], 0
+    n = len(parts)
+    for k, p in enumerate(parts, 1):
+        head = f"日期：{date}\n" + (f"标签：{tag}\n" if tag else "")
+        if n > 1:
+            head += f"（第{k}/{n}段）\n"
+        text = head + "内容：" + p
+        if text in existing:
+            skipped += 1
+            continue
+        try:
+            emb = await get_embedding(text)
+            assert len(emb) > 100
+        except Exception as e:
+            raise RuntimeError(f"向量化失败，整条都没写入：{e}")
+        new_entries.append({
+            "id": uuid.uuid4().hex[:12],
+            "content": text,
+            "timestamp": date,
+            "source": source[:30],
+            "embedding": emb,
+        })
+    if new_entries:
+        chronicle.extend(new_entries)
+        with open(CHRONICLE_FILE, "w", encoding="utf-8") as f:
+            json.dump(chronicle, f, ensure_ascii=False)
+        _schedule_push()
+    return {"added": len(new_entries), "skipped": skipped, "ids": [e["id"] for e in new_entries]}
+
+@_locked
+async def forget_from_chronicle(entry_id: str) -> int:
+    chronicle = load_chronicle()
+    new = [e for e in chronicle if e.get("id") != entry_id]
+    removed = len(chronicle) - len(new)
+    if removed:
+        with open(CHRONICLE_FILE, "w", encoding="utf-8") as f:
+            json.dump(new, f, ensure_ascii=False)
+        _schedule_push()
+    return removed
+
+def _schedule_push(delay: int = 30):
+    """安静30秒后只推一次GitHub（推送会让Render重启，别连着推）"""
+    global _PUSH_GEN
+    _PUSH_GEN += 1
+    mine = _PUSH_GEN
+    _asyncio.create_task(_delayed_push(mine, delay))
+
+async def _delayed_push(mine: int, delay: int):
+    await _asyncio.sleep(delay)
+    if mine != _PUSH_GEN:
+        return
+    async with _LOCK:
+        if mine != _PUSH_GEN:
+            return
+        await _push_file_to_github(CHRONICLE_FILE, load_chronicle(), "ingest: batch")
+
 # ── GitHub 同步工具 ──────────────────────────────────
 
 async def _push_file_to_github(filename: str, data: list, commit_msg: str):
