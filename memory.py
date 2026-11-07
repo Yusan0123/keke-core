@@ -1,3 +1,12 @@
+import asyncio as _asyncio
+_LOCK = _asyncio.Lock()
+def _locked(fn):
+    async def w(*a, **k):
+        async with _LOCK:
+            return await fn(*a, **k)
+    w.__name__ = fn.__name__
+    return w
+
 import json
 import os
 import math
@@ -106,6 +115,7 @@ async def recall_long_term(query: str, top_k: int = 4) -> list:
     scored.sort(key=lambda x: x[0], reverse=True)
     return [e for sim, e in scored[:top_k] if sim > 0.3]
 
+@_locked
 async def approve_pending_to_chronicle(entry_id: str) -> bool:
     """把pending里的一条审批进chronicle（向量化后存入）"""
     pending = load_pending()
@@ -152,6 +162,7 @@ def _save_pending(pending: list):
     with open(PENDING_FILE, "w", encoding="utf-8") as f:
         json.dump(pending, f, ensure_ascii=False, indent=2)
 
+@_locked
 async def append_to_pending(trigger: str, content: str):
     """克克主动存的记忆先进待审队列"""
     pending = load_pending()
@@ -167,6 +178,7 @@ async def append_to_pending(trigger: str, content: str):
     await _push_file_to_github(PENDING_FILE, pending, f"keke: new memory note {entry['id'][:8]}")
     print(f"克克记了一条待审记忆：{content[:50]}")
 
+@_locked
 async def delete_pending(entry_id: str) -> bool:
     """删除一条pending条目"""
     pending = load_pending()
