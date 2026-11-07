@@ -226,6 +226,47 @@ async def memory_save(req: MemorySaveRequest, x_memory_token: Optional[str] = He
     await append_to_pending(req.trigger, req.content)
     return {"ok": True}
 
+_approve_state = {"running": False, "done": 0, "failed": [], "total": 0}
+
+async def _approve_all_task():
+    _approve_state.update(running=True, done=0, failed=[], total=0)
+    ids = [e["id"] for e in load_pending()]
+    _approve_state["total"] = len(ids)
+    for i in ids:
+        try:
+            ok = await approve_pending_to_chronicle(i)
+        except Exception as e:
+            print("approve error", e)
+            ok = False
+        if ok:
+            _approve_state["done"] += 1
+        else:
+            _approve_state["failed"].append(i[:8])
+    _approve_state["running"] = False
+
+@app.post("/memory/approve_all")
+async def memory_approve_all(x_memory_token: Optional[str] = Header(None)):
+    _require_memory_token(x_memory_token)
+    if _approve_state["running"]:
+        return {"started": False, "msg": "正在收，别急"}
+    asyncio.create_task(_approve_all_task())
+    return {"started": True}
+
+@app.get("/memory/status")
+async def memory_status(x_memory_token: Optional[str] = Header(None)):
+    _require_memory_token(x_memory_token)
+    from memory import load_chronicle
+    return {"pending": len(load_pending()), "chronicle": len(load_chronicle()), **_approve_state}
+
+@app.post("/memory/delete_pending")
+async def memory_delete_pending(req: ApproveRequest, x_memory_token: Optional[str] = Header(None)):
+    _require_memory_token(x_memory_token)
+    full = next((e["id"] for e in load_pending() if e["id"].startswith(req.id)), None)
+    if not full:
+        raise HTTPException(status_code=404, detail="找不到")
+    return {"ok": await delete_pending(full)}
+
+
 # ── 手机入口：伪装成SearXNG，博物馆结果在前，Tavily真网页结果在后 ──
 # 搜索地址填 https://域名/s/钥匙
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
