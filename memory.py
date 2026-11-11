@@ -1,33 +1,32 @@
-import asyncio as _asyncio
-_LOCK = _asyncio.Lock()
-def _locked(fn):
-    async def w(*a, **k):
-        async with _LOCK:
-            return await fn(*a, **k)
-    w.__name__ = fn.__name__
-    return w
-
 import json
 import os
-import math
-import uuid
-import base64
 from datetime import datetime
+
 import httpx
+from fastapi import HTTPException
 
 MEMORY_FILE = "memory_log.json"
-CHRONICLE_FILE = "chronicle.json"
-PENDING_FILE = "pending.json"
+MEMORY_SERVICE_URL = os.environ.get("MEMORY_SERVICE_URL", "https://lumi-memory-museum.yusan-159357.workers.dev").rstrip("/")
+MEMORY_API_TOKEN = os.environ.get("MEMORY_API_TOKEN", "")
 
-EMBED_API_KEY = os.environ.get("EMBED_API_KEY", "")
-EMBED_API_BASE = os.environ.get("EMBED_API_BASE", "https://aihubmix.com")
-EMBED_MODEL = "BAAI/bge-m3"
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "Yusan0123/keke-core")
-GITHUB_BRANCH = "main"
+async def request_memory(method, path, payload=None, params=None):
+    if not MEMORY_API_TOKEN:
+        raise HTTPException(status_code=503, detail="记忆服务鉴权尚未配置")
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.request(method, MEMORY_SERVICE_URL + path,
+                headers={"X-Memory-Token": MEMORY_API_TOKEN}, json=payload, params=params)
+    except httpx.RequestError as error:
+        raise HTTPException(status_code=503, detail="记忆服务暂时不可用，请稍后重试") from error
+    if response.is_error:
+        try:
+            detail = response.json().get("detail", "记忆服务请求失败")
+        except (ValueError, AttributeError):
+            detail = "记忆服务请求失败"
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return response.json()
 
-# ── 基础对话历史（on top of mind）────────────────────
 
 def load_memory() -> list:
     if not os.path.exists(MEMORY_FILE):
@@ -55,260 +54,52 @@ def get_recent_history(n: int = 20) -> list:
     recent = history[-n:] if len(history) > n else history
     return [{"role": h["role"], "content": h["content"]} for h in recent]
 
-def get_short_term(n: int = 5) -> list:
-    """取最近n条pending（short term记忆，直接返回，不做向量召回）"""
-    pending = load_pending()
-    recent = pending[-n:] if len(pending) > n else pending
-    return recent
-
-# ── 向量工具 ──────────────────────────────────────────
-
-async def get_embedding(text: str) -> list:
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            f"{EMBED_API_BASE.rstrip('/')}/v1/embeddings",
-            headers={
-                "Authorization": f"Bearer {EMBED_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": EMBED_MODEL,
-                "input": text[:512]
-            }
-        )
-        return response.json()["data"][0]["embedding"]
-
-def cosine_similarity(a: list, b: list) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
-
-# ── 长期记忆 chronicle（long term）──────────────────
-
-def load_chronicle() -> list:
-    if not os.path.exists(CHRONICLE_FILE):
-        return []
-    with open(CHRONICLE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 async def recall_long_term(query: str, top_k: int = 4) -> list:
-    """按相关度召回长期记忆"""
-    chronicle = load_chronicle()
-    if not chronicle:
-        return []
+    return (await request_memory("GET", "/memory/search", params={"q": query, "top_k": top_k}))["results"]
 
-    try:
-        query_vec = await get_embedding(query)
-    except Exception:
-        return []
 
-    scored = []
-    for entry in chronicle:
-        if "embedding" not in entry:
-            continue
-        sim = cosine_similarity(query_vec, entry["embedding"])
-        scored.append((sim, entry))
+async def load_pending() -> list:
+    return await request_memory("GET", "/pending")
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [e for sim, e in scored[:top_k] if sim > 0.3]
 
-@_locked
-async def approve_pending_to_chronicle(entry_id: str) -> bool:
-    """把pending里的一条审批进chronicle（向量化后存入）"""
-    pending = load_pending()
-    target = next((e for e in pending if e["id"] == entry_id), None)
-    if not target:
-        return False
+async def get_short_term(n: int = 5) -> list:
+    return (await load_pending())[-n:]
 
-    text = target["content"]
-    try:
-        embedding = await get_embedding(text)
-    except Exception as e:
-        print(f"向量化失败：{e}")
-        return False
 
-    chronicle = load_chronicle()
-    chronicle.append({
-        "content": text,
-        "timestamp": target["timestamp"],
-        "source": "approved_from_pending",
-        "embedding": embedding
-    })
-
-    with open(CHRONICLE_FILE, "w", encoding="utf-8") as f:
-        json.dump(chronicle, f, ensure_ascii=False)
-
-    # 从pending移除
-    pending = [e for e in pending if e["id"] != entry_id]
-    _save_pending(pending)
-
-    # 两个文件都同步GitHub
-    await _push_file_to_github(CHRONICLE_FILE, chronicle, f"approve: memory {entry_id[:8]}")
-    await _push_file_to_github(PENDING_FILE, pending, f"approve: remove pending {entry_id[:8]}")
-    return True
-
-# ── 待审队列 pending（short term）────────────────────
-
-def load_pending() -> list:
-    if not os.path.exists(PENDING_FILE):
-        return []
-    with open(PENDING_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def _save_pending(pending: list):
-    with open(PENDING_FILE, "w", encoding="utf-8") as f:
-        json.dump(pending, f, ensure_ascii=False, indent=2)
-
-@_locked
 async def append_to_pending(trigger: str, content: str):
-    """克克主动存的记忆先进待审队列"""
-    pending = load_pending()
-    entry = {
-        "id": str(uuid.uuid4()),
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "trigger": trigger[:200],   # 触发这条记忆的用户原话
-        "content": content,
-        "status": "pending"
-    }
-    pending.append(entry)
-    _save_pending(pending)
-    await _push_file_to_github(PENDING_FILE, pending, f"keke: new memory note {entry['id'][:8]}")
-    print(f"克克记了一条待审记忆：{content[:50]}")
+    return await request_memory("POST", "/memory/save", payload={"trigger": trigger, "content": content})
 
-@_locked
-async def delete_pending(entry_id: str) -> bool:
-    """删除一条pending条目"""
-    pending = load_pending()
-    new_pending = [e for e in pending if e["id"] != entry_id]
-    if len(new_pending) == len(pending):
-        return False
-    _save_pending(new_pending)
-    await _push_file_to_github(PENDING_FILE, new_pending, f"delete: pending {entry_id[:8]}")
+
+async def approve_pending_to_chronicle(entry_id: str) -> bool:
+    try:
+        await request_memory("POST", "/pending/approve", payload={"id": entry_id})
+    except HTTPException as error:
+        if error.status_code == 404:
+            return False
+        raise
     return True
 
-# ── 直接入长期记忆（带钥匙的接口用，不经待审）──────────
-import re as _re
 
-_PUSH_GEN = 0
+async def delete_pending(entry_id: str) -> bool:
+    try:
+        await request_memory("POST", "/pending/delete", payload={"id": entry_id})
+    except HTTPException as error:
+        if error.status_code == 404:
+            return False
+        raise
+    return True
 
-def split_text(text: str, limit: int = 400) -> list:
-    """按段落/句号拆成每段不超过limit字，留空间给日期标签前缀（总长<512）"""
-    text = text.strip()
-    if len(text) <= limit:
-        return [text] if text else []
-    pieces = [p for p in _re.split(r'(?<=[。！？!?；;\n])', text) if p.strip()]
-    out, cur = [], ""
-    for p in pieces:
-        while len(p) > limit:
-            if cur:
-                out.append(cur); cur = ""
-            out.append(p[:limit]); p = p[limit:]
-        if len(cur) + len(p) > limit and cur:
-            out.append(cur); cur = ""
-        cur += p
-    if cur.strip():
-        out.append(cur)
-    return [o.strip() for o in out if o.strip()]
 
-@_locked
 async def ingest_to_chronicle(content: str, date: str = "", tag: str = "", source: str = "ChatGPT") -> dict:
-    date = (date or datetime.now().strftime("%Y-%m-%d %H:%M"))[:20]
-    tag = (tag or "")[:30]
-    parts = split_text(content)
-    if not parts:
-        return {"added": 0, "skipped": 0, "ids": []}
-    chronicle = load_chronicle()
-    existing = {e.get("content") for e in chronicle}
-    new_entries, skipped = [], 0
-    n = len(parts)
-    for k, p in enumerate(parts, 1):
-        head = f"日期：{date}\n" + (f"标签：{tag}\n" if tag else "")
-        if n > 1:
-            head += f"（第{k}/{n}段）\n"
-        text = head + "内容：" + p
-        if text in existing:
-            skipped += 1
-            continue
-        try:
-            emb = await get_embedding(text)
-            assert len(emb) > 100
-        except Exception as e:
-            raise RuntimeError(f"向量化失败，整条都没写入：{e}")
-        new_entries.append({
-            "id": uuid.uuid4().hex[:12],
-            "content": text,
-            "timestamp": date,
-            "source": source[:30],
-            "embedding": emb,
-        })
-    if new_entries:
-        chronicle.extend(new_entries)
-        with open(CHRONICLE_FILE, "w", encoding="utf-8") as f:
-            json.dump(chronicle, f, ensure_ascii=False)
-        _schedule_push()
-    return {"added": len(new_entries), "skipped": skipped, "ids": [e["id"] for e in new_entries]}
+    return await request_memory("POST", "/memory/ingest", payload={"content": content, "date": date, "tag": tag, "source": source})
 
-@_locked
+
 async def forget_from_chronicle(entry_id: str) -> int:
-    chronicle = load_chronicle()
-    new = [e for e in chronicle if e.get("id") != entry_id]
-    removed = len(chronicle) - len(new)
-    if removed:
-        with open(CHRONICLE_FILE, "w", encoding="utf-8") as f:
-            json.dump(new, f, ensure_ascii=False)
-        _schedule_push()
-    return removed
-
-def _schedule_push(delay: int = 30):
-    """安静30秒后只推一次GitHub（推送会让Render重启，别连着推）"""
-    global _PUSH_GEN
-    _PUSH_GEN += 1
-    mine = _PUSH_GEN
-    _asyncio.create_task(_delayed_push(mine, delay))
-
-async def _delayed_push(mine: int, delay: int):
-    await _asyncio.sleep(delay)
-    if mine != _PUSH_GEN:
-        return
-    async with _LOCK:
-        if mine != _PUSH_GEN:
-            return
-        await _push_file_to_github(CHRONICLE_FILE, load_chronicle(), "ingest: batch")
-
-# ── GitHub 同步工具 ──────────────────────────────────
-
-async def _push_file_to_github(filename: str, data: list, commit_msg: str):
-    """通用：把一个json文件推送到GitHub"""
-    if not GITHUB_TOKEN:
-        print("GITHUB_TOKEN未配置，跳过GitHub同步")
-        return
-
-    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-
-    content_bytes = json.dumps(data, ensure_ascii=False).encode("utf-8")
-    content_b64 = base64.b64encode(content_bytes).decode("utf-8")
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        get_resp = await client.get(api_url, headers=headers)
-        sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
-
-        body = {
-            "message": commit_msg,
-            "content": content_b64,
-            "branch": GITHUB_BRANCH
-        }
-        if sha:
-            body["sha"] = sha
-
-        put_resp = await client.put(api_url, headers=headers, json=body)
-        if put_resp.status_code in (200, 201):
-            print(f"{filename} 已同步到GitHub")
-        else:
-            print(f"推送 {filename} 失败：{put_resp.status_code} {put_resp.text[:200]}")
+    try:
+        result = await request_memory("POST", "/memory/forget", payload={"id": entry_id})
+    except HTTPException as error:
+        if error.status_code == 404:
+            return 0
+        raise
+    return result["removed"]

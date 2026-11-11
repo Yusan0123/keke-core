@@ -1,0 +1,6 @@
+{
+  "name": "lumi-memory-museum",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.js" }
+}

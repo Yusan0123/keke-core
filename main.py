@@ -14,7 +14,7 @@ from memory import (
     recall_long_term, get_short_term,
     append_to_pending, approve_pending_to_chronicle,
     delete_pending, load_pending,
-    load_chronicle, get_embedding, cosine_similarity,
+    request_memory,
     ingest_to_chronicle, forget_from_chronicle
 )
 
@@ -113,7 +113,7 @@ async def chat(req: ChatRequest, session: Optional[str] = Cookie(None)):
     _require_auth(session)
 
     long_term = await recall_long_term(req.message, top_k=4)
-    short_term = get_short_term(n=5)
+    short_term = await get_short_term(n=5)
 
     memory_parts = []
     if long_term:
@@ -165,7 +165,7 @@ async def get_history(session: Optional[str] = Cookie(None)):
 @app.get("/pending")
 async def get_pending_list(session: Optional[str] = Cookie(None)):
     _require_auth(session)
-    return load_pending()
+    return await load_pending()
 
 
 @app.post("/pending/approve")
@@ -188,7 +188,7 @@ async def delete_memory_entry(req: ApproveRequest, session: Optional[str] = Cook
 
 @app.api_route("/health", methods=["GET","HEAD"])
 async def health():
-    return {"ok": True}
+    return {"ok": True, "memory_backend": "cloudflare"}
 
 
 # ── 博物馆之门（外部访问，独立钥匙，不走登录cookie）──────
@@ -202,18 +202,7 @@ def _require_memory_token(token: Optional[str]):
 @app.get("/memory/search")
 async def memory_search(q: str, top_k: int = 5, x_memory_token: Optional[str] = Header(None)):
     _require_memory_token(x_memory_token)
-    top_k = max(1, min(top_k, 10))
-    chronicle = load_chronicle()
-    try:
-        qv = await get_embedding(q)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"向量化失败：{e}")
-    scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return {"results": [
-        {"score": round(s, 3), "id": e.get("id", ""), "timestamp": e.get("timestamp", ""), "content": e["content"]}
-        for s, e in scored[:top_k] if s > 0.3
-    ]}
+    return await request_memory("GET", "/memory/search", params={"q": q, "top_k": max(1, min(top_k, 10))})
 
 
 class MemorySaveRequest(BaseModel):
@@ -259,42 +248,22 @@ async def memory_forget(req: ForgetRequest, x_memory_token: Optional[str] = Head
     return {"ok": True, "removed": n}
 
 
-_approve_state = {"running": False, "done": 0, "failed": [], "total": 0}
-
-async def _approve_all_task():
-    _approve_state.update(running=True, done=0, failed=[], total=0)
-    ids = [e["id"] for e in load_pending()]
-    _approve_state["total"] = len(ids)
-    for i in ids:
-        try:
-            ok = await approve_pending_to_chronicle(i)
-        except Exception as e:
-            print("approve error", e)
-            ok = False
-        if ok:
-            _approve_state["done"] += 1
-        else:
-            _approve_state["failed"].append(i[:8])
-    _approve_state["running"] = False
-
 @app.post("/memory/approve_all")
 async def memory_approve_all(x_memory_token: Optional[str] = Header(None)):
     _require_memory_token(x_memory_token)
-    if _approve_state["running"]:
-        return {"started": False, "msg": "正在收，别急"}
-    asyncio.create_task(_approve_all_task())
-    return {"started": True}
+    return await request_memory("POST", "/memory/approve_all", payload={})
+
 
 @app.get("/memory/status")
 async def memory_status(x_memory_token: Optional[str] = Header(None)):
     _require_memory_token(x_memory_token)
-    from memory import load_chronicle
-    return {"pending": len(load_pending()), "chronicle": len(load_chronicle()), **_approve_state}
+    return await request_memory("GET", "/memory/status")
+
 
 @app.post("/memory/delete_pending")
 async def memory_delete_pending(req: ApproveRequest, x_memory_token: Optional[str] = Header(None)):
     _require_memory_token(x_memory_token)
-    full = next((e["id"] for e in load_pending() if e["id"].startswith(req.id)), None)
+    full = next((entry["id"] for entry in await load_pending() if entry["id"].startswith(req.id)), None)
     if not full:
         raise HTTPException(status_code=404, detail="找不到")
     return {"ok": await delete_pending(full)}
@@ -346,11 +315,9 @@ async def searxng_disguise(key: str, q: str = "", format: str = "json"):
     web_task = asyncio.create_task(_tavily_search(q, 5)) if mix_web else None
     museum = []
     try:
-        chronicle = load_chronicle()
-        qv = await get_embedding(_clean_query(q))
-        scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
-        scored.sort(key=lambda x: x[0], reverse=True)
-        for i, (s, e) in enumerate(scored[:4]):
+        result = await request_memory("GET", "/memory/search", params={"q": _clean_query(q), "top_k": 4})
+        for i, e in enumerate(result["results"]):
+            s = e["score"]
             if s <= 0.35:
                 continue
             museum.append({
@@ -358,8 +325,8 @@ async def searxng_disguise(key: str, q: str = "", format: str = "json"):
                 "url": f"https://museum.local/{i+1}",
                 "content": e["content"],
             })
-    except Exception:
-        pass
+    except HTTPException:
+        raise
     web = await web_task if web_task else []
     if museum:
         museum.insert(0, {
@@ -408,15 +375,11 @@ _MCP_TOOLS = [
 
 
 async def _mcp_museum_search(query: str, top_k: int = 5) -> str:
-    top_k = max(1, min(int(top_k or 5), 10))
-    chronicle = load_chronicle()
-    qv = await get_embedding(_clean_query(query))
-    scored = [(cosine_similarity(qv, e["embedding"]), e) for e in chronicle if "embedding" in e]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    hits = [(s, e) for s, e in scored[:top_k] if s > 0.3]
+    result = await request_memory("GET", "/memory/search", params={"q": _clean_query(query), "top_k": max(1, min(int(top_k or 5), 10))})
+    hits = result["results"]
     if not hits:
         return "博物馆已经翻过了：没有找到相关记忆（可能当时没存进去，可以换个说法再搜一次）。"
-    parts = [f"#{i+1} [相关度{round(s,2)}] {e.get('timestamp','')}\n{e['content']}" for i, (s, e) in enumerate(hits)]
+    parts = [f"#{i+1} [相关度{round(entry['score'],2)}] {entry.get('timestamp','')}\n{entry['content']}" for i, entry in enumerate(hits)]
     return "\n\n---\n\n".join(parts) + "\n\n（以上是博物馆的全部结果）"
 
 
